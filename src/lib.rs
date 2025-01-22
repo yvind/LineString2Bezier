@@ -1,4 +1,4 @@
-use geo::{Coord, LineString, Vector2DOps};
+use geo_types::{Coord, LineString};
 
 #[derive(Clone, Debug)]
 pub struct BezierSegment(pub (Coord, Option<Coord>, Option<Coord>, Coord));
@@ -379,5 +379,47 @@ impl BezierString {
             }
         }
         v_temp[0]
+    }
+}
+
+// impl the used functions myself to avoid
+// having the entire geo crate as a dependency
+trait VectorTraits<Rhs = Self>
+where
+    Self: Sized,
+{
+    fn magnitude_squared(&self) -> f64;
+    fn magnitude(&self) -> f64;
+    fn dot_product(&self, other: Rhs) -> f64;
+    fn try_normalize(&self) -> Option<Self>;
+    fn is_finite(&self) -> bool;
+}
+
+impl VectorTraits for Coord {
+    fn magnitude_squared(&self) -> f64 {
+        self.x * self.x + self.y * self.y
+    }
+
+    fn magnitude(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    fn dot_product(&self, other: Self) -> f64 {
+        self.x * other.x + self.y * other.y
+    }
+
+    fn try_normalize(&self) -> Option<Self> {
+        let magnitude = self.magnitude();
+        let result = *self / magnitude;
+
+        if result.is_finite() && magnitude.is_finite() {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
     }
 }
