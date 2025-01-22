@@ -1,0 +1,7 @@
+[package]
+name = "polyline2bezier"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+geo = "0.29.3"
