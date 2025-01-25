@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-geo-types = "0.7.15"
+geo-types = "^0.7.13"
