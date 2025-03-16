@@ -39,7 +39,7 @@ impl BezierString {
         num_points + 1
     }
 
-    pub fn from_polyline(polyline: &LineString, error: f64) -> BezierString {
+    pub fn from_polyline(polyline: LineString, error: f64) -> BezierString {
         let n_pts = polyline.0.len();
         if n_pts <= 2 || (n_pts <= 3 && polyline.is_closed()) {
             //panic!("Degenerate line");
