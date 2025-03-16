@@ -3,17 +3,9 @@ use geo_types::{Coord, LineString};
 #[derive(Clone, Debug)]
 pub struct BezierSegment(pub (Coord, Option<Coord>, Option<Coord>, Coord));
 
-pub enum BezierSegmentType {
-    Polyline,
-    Bezier,
-}
-
 impl BezierSegment {
-    pub fn line_type(&self) -> BezierSegmentType {
-        match self.0 .1 {
-            None => BezierSegmentType::Polyline,
-            Some(_) => BezierSegmentType::Bezier,
-        }
+    pub fn is_bezier_segment(&self) -> bool {
+        self.0 .1.is_some()
     }
 }
 
@@ -31,9 +23,9 @@ impl BezierString {
         let mut num_points = 0;
 
         for segment in self.0.iter() {
-            match segment.line_type() {
-                BezierSegmentType::Polyline => num_points += 1,
-                BezierSegmentType::Bezier => num_points += 3,
+            num_points += 1;
+            if segment.is_bezier_segment() {
+                num_points += 2
             }
         }
         num_points + 1
