@@ -1,10 +1,10 @@
 [package]
 name = "linestring2bezier"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Øyvind Hjermstad <@yvind>"]
 
-description = "For converting geo_types::LineString to a cubic bezier spline."
+description = "For converting geo_types::LineString<T: CoordFloat> to a cubic bezier spline."
 homepage = "https://github.com/yvind/linestring2bezier"
 repository = "https://github.com/yvind/linestring2bezier"
 readme = "README.md"

@@ -1,24 +1,59 @@
-use geo_types::{Coord, LineString};
+//! Approximate a geo_types::LineString<T> with a cubic bezier spline
+//!
+//! Pass the linestring and a maximum allowed error to BezierString::from_linestring
+//! The error is the maximum distance between the linestring and the bezier spline
+//! evaulated at the linestring vertices and at the middle point between the vertices
 
+use geo_types::{Coord, CoordFloat, LineString};
+
+/// Simple struct to represent a bezier segement
+/// If the `Option` is `None` then the segment is a simple straight line segment
 #[derive(Clone, Debug)]
-pub struct BezierSegment(pub (Coord, Option<(Coord, Coord)>, Coord));
+pub struct BezierSegment<T: CoordFloat = f64> {
+    pub start: Coord<T>,
+    pub handles: Option<(Coord<T>, Coord<T>)>,
+    pub end: Coord<T>,
+}
 
-impl BezierSegment {
+impl<T: CoordFloat> BezierSegment<T> {
+    /// Is this segment a cubic bezier?
     pub fn is_bezier_segment(&self) -> bool {
-        self.0 .1.is_some()
+        self.handles.is_some()
+    }
+
+    pub fn new(
+        start: Coord<T>,
+        handles: Option<(Coord<T>, Coord<T>)>,
+        end: Coord<T>,
+    ) -> BezierSegment<T> {
+        BezierSegment {
+            start,
+            handles,
+            end,
+        }
     }
 }
 
-impl From<[Coord; 4]> for BezierSegment {
-    fn from(value: [Coord; 4]) -> Self {
-        BezierSegment((value[0], Some((value[1], value[2])), value[3]))
+impl<T> From<[Coord<T>; 4]> for BezierSegment<T>
+where
+    T: CoordFloat,
+{
+    fn from(value: [Coord<T>; 4]) -> Self {
+        BezierSegment {
+            start: value[0],
+            handles: Some((value[1], value[2])),
+            end: value[3],
+        }
     }
 }
 
+/// A BezierString is simply a vector of [BezierSegment]s
 #[derive(Debug)]
-pub struct BezierString(pub Vec<BezierSegment>);
+pub struct BezierString<T: CoordFloat = f64>(pub Vec<BezierSegment<T>>);
 
-impl BezierString {
+impl<T: CoordFloat> BezierString<T> {
+    /// The number of vertices and handles in this [BezierString]
+    /// The endpoints of each [BezierSegment] are not counted double
     pub fn num_points(&self) -> usize {
         let mut num_points = 0;
 
@@ -31,15 +66,16 @@ impl BezierString {
         num_points + 1
     }
 
-    pub fn from_polyline(polyline: LineString, error: f64) -> BezierString {
-        let n_pts = polyline.0.len();
-        if n_pts <= 2 || (n_pts <= 3 && polyline.is_closed()) {
-            //panic!("Degenerate line");
+    /// Convert a [geo_types::LineString] to a [BezierString] with a maximum of `error` deviation between the two
+    /// evaulated at the linestring vertices and at the middle point between the vertices
+    pub fn from_linestring(linestring: LineString<T>, error: T) -> BezierString<T> {
+        let n_pts = linestring.0.len();
+        if n_pts <= 2 || (n_pts <= 3 && linestring.is_closed()) {
             let mut segments = vec![];
 
-            let mut prev_coord = polyline.0[0];
-            for p in polyline.0.iter().skip(1) {
-                segments.push(BezierSegment((prev_coord, None, *p)));
+            let mut prev_coord = linestring.0[0];
+            for p in linestring.0.iter().skip(1) {
+                segments.push(BezierSegment::new(prev_coord, None, *p));
                 prev_coord = *p;
             }
 
@@ -48,17 +84,17 @@ impl BezierString {
 
         let mut bezier_segments = vec![];
 
-        let mut tangent_right = Self::compute_right_tangent(&polyline.0, 0);
-        let mut tangent_left = Self::compute_left_tangent(&polyline.0, n_pts - 1);
+        let mut tangent_right = Self::compute_right_tangent(linestring.0.as_slice(), 0);
+        let mut tangent_left = Self::compute_left_tangent(linestring.0.as_slice(), n_pts - 1);
 
-        if polyline.is_closed() {
+        if linestring.is_closed() {
             tangent_right = (tangent_right - tangent_left).try_normalize().unwrap();
             tangent_left = -tangent_right;
         }
 
-        // recursivly tries to fit bezier segments to the polyline
+        // recursivly tries to fit bezier segments to the linestring
         Self::fit_cubic(
-            &polyline.0,
+            &linestring.0,
             0,
             n_pts - 1,
             tangent_right,
@@ -71,24 +107,30 @@ impl BezierString {
 
     // recursive function to fit bezier curve segments to linestring
     fn fit_cubic(
-        polyline: &[Coord],
+        polyline: &[Coord<T>],
         first: usize,
         last: usize,
-        tangent_start: Coord,
-        tangent_end: Coord,
-        error: f64,
-        bezier_string: &mut Vec<BezierSegment>,
+        tangent_start: Coord<T>,
+        tangent_end: Coord<T>,
+        error: T,
+        bezier_string: &mut Vec<BezierSegment<T>>,
     ) {
         // Handle two-point case, recursion base case
         if last - first == 1 {
-            bezier_string.push(BezierSegment((polyline[first], None, polyline[last])));
+            bezier_string.push(BezierSegment::new(polyline[first], None, polyline[last]));
             return;
         }
 
         // Parameterize points and attempt to fit curve,
         let mut ts = Self::chord_length_parameterize(polyline, first, last);
-        let mut bez_curve =
-            Self::generate_bezier(polyline, first, last, &ts, &tangent_start, &tangent_end);
+        let mut bez_curve = Self::generate_bezier(
+            polyline,
+            first,
+            last,
+            ts.as_slice(),
+            &tangent_start,
+            &tangent_end,
+        );
 
         // Find max deviation
         let (mut max_error, mut split_point) =
@@ -100,7 +142,7 @@ impl BezierString {
         }
 
         // If error not too large, try one step of newton-rhapson
-        if max_error < 2. * error {
+        if max_error < T::from(2.).unwrap() * error {
             ts = Self::reparameterize(polyline, first, last, &ts, &bez_curve);
             bez_curve =
                 Self::generate_bezier(polyline, first, last, &ts, &tangent_start, &tangent_end);
@@ -140,15 +182,15 @@ impl BezierString {
     // using least-squares method to find the Bezier handles for region
     // with t-values for evaluation and end point tangents given
     fn generate_bezier(
-        polyline: &[Coord],
+        polyline: &[Coord<T>],
         first: usize,
         last: usize,
-        ts: &[f64],
-        start_tangent: &Coord,
-        end_tangent: &Coord,
-    ) -> [Coord; 4] {
+        ts: &[T],
+        start_tangent: &Coord<T>,
+        end_tangent: &Coord<T>,
+    ) -> [Coord<T>; 4] {
         let n_pts = last - first + 1;
-        let mut a: Vec<[Coord; 2]> = Vec::with_capacity(n_pts);
+        let mut a: Vec<[Coord<T>; 2]> = Vec::with_capacity(n_pts);
 
         // Compute the A's
         for &t in ts {
@@ -158,20 +200,20 @@ impl BezierString {
         // Create the C and X matrices
         // C is symmetric 2x2, sum of indecies in 2x2 gives index in flat array
         // X is a 2x1 vector
-        let mut c = [0.0, 0.0, 0.0];
-        let mut x = [0.0, 0.0];
+        let mut c = [T::zero(); 3];
+        let mut x = [T::zero(); 2];
 
         for (i, &t) in ts.iter().enumerate() {
-            c[0] += a[i][0].dot_product(a[i][0]);
-            c[1] += a[i][0].dot_product(a[i][1]);
-            c[2] += a[i][1].dot_product(a[i][1]);
+            c[0] = c[0] + a[i][0].dot_product(a[i][0]);
+            c[1] = c[1] + a[i][0].dot_product(a[i][1]);
+            c[2] = c[2] + a[i][1].dot_product(a[i][1]);
 
             let tmp = polyline[first + i]
                 - (polyline[first] * (Self::b0(t) + Self::b1(t))
                     + polyline[last] * (Self::b2(t) + Self::b3(t)));
 
-            x[0] += a[i][0].dot_product(tmp);
-            x[1] += a[i][1].dot_product(tmp);
+            x[0] = x[0] + a[i][0].dot_product(tmp);
+            x[1] = x[1] + a[i][1].dot_product(tmp);
         }
 
         // Compute the determinants
@@ -180,23 +222,23 @@ impl BezierString {
         let det_x_c1 = x[0] * c[2] - x[1] * c[1];
 
         // Derive alpha values
-        let alpha_l = if det_c0_c1 == 0.0 {
-            0.0
+        let alpha_l = if det_c0_c1 == T::zero() {
+            T::zero()
         } else {
             det_x_c1 / det_c0_c1
         };
-        let alpha_r = if det_c0_c1 == 0.0 {
-            0.0
+        let alpha_r = if det_c0_c1 == T::zero() {
+            T::zero()
         } else {
             det_c0_x / det_c0_c1
         };
 
         // If alpha negative, use the Wu/Barsky heuristic
         let seg_length = (polyline[last] - polyline[first]).magnitude();
-        let epsilon = 1.0e-6 * seg_length;
+        let epsilon = T::from(1.0e-6).unwrap() * seg_length;
 
         if alpha_l < epsilon || alpha_r < epsilon {
-            let dist = seg_length / 3.0;
+            let dist = seg_length / T::from(3.0).unwrap();
             return [
                 polyline[first],
                 polyline[first] + *start_tangent * dist,
@@ -215,38 +257,38 @@ impl BezierString {
 
     // Bezier basis functions
     #[inline]
-    fn b0(t: f64) -> f64 {
-        (1.0 - t).powi(3)
+    fn b0(t: T) -> T {
+        (T::one() - t).powi(3)
     }
 
     #[inline]
-    fn b1(t: f64) -> f64 {
-        3.0 * t * (1.0 - t).powi(2)
+    fn b1(t: T) -> T {
+        T::from(3.0).unwrap() * t * (T::one() - t).powi(2)
     }
 
     #[inline]
-    fn b2(t: f64) -> f64 {
-        3.0 * t.powi(2) * (1.0 - t)
+    fn b2(t: T) -> T {
+        T::from(3.0).unwrap() * t.powi(2) * (T::one() - t)
     }
 
     #[inline]
-    fn b3(t: f64) -> f64 {
+    fn b3(t: T) -> T {
         t.powi(3)
     }
 
     // Vertex tangent functions
     #[inline]
-    fn compute_right_tangent(polyline: &[Coord], end: usize) -> Coord {
+    fn compute_right_tangent(polyline: &[Coord<T>], end: usize) -> Coord<T> {
         (polyline[end + 1] - polyline[end]).try_normalize().unwrap()
     }
 
     #[inline]
-    fn compute_left_tangent(polyline: &[Coord], end: usize) -> Coord {
+    fn compute_left_tangent(polyline: &[Coord<T>], end: usize) -> Coord<T> {
         (polyline[end - 1] - polyline[end]).try_normalize().unwrap()
     }
 
     #[inline]
-    fn compute_center_tangent(polyline: &[Coord], center: usize) -> Coord {
+    fn compute_center_tangent(polyline: &[Coord<T>], center: usize) -> Coord<T> {
         (polyline[center + 1] - polyline[center - 1])
             .try_normalize()
             .unwrap()
@@ -254,17 +296,17 @@ impl BezierString {
 
     // normalized length along linestring from start of segment to every vertex in segment
     // the t values to be used for computing error of fitted bezier
-    fn chord_length_parameterize(polyline: &[Coord], first: usize, last: usize) -> Vec<f64> {
+    fn chord_length_parameterize(polyline: &[Coord<T>], first: usize, last: usize) -> Vec<T> {
         let mut ts = Vec::with_capacity(last - first + 1);
 
-        ts.push(0.);
+        ts.push(T::zero());
         for i in (first + 1)..=last {
             ts.push(ts[i - first - 1] + (polyline[i] - polyline[i - 1]).magnitude());
         }
 
         let t_last = ts[last - first];
         for t in ts.iter_mut() {
-            *t /= t_last;
+            *t = *t / t_last;
         }
         ts
     }
@@ -272,13 +314,13 @@ impl BezierString {
     // given a set of points and their parameterization on the bez curve
     // use newton rhapson to try and refine the parameterization
     fn reparameterize(
-        polyline: &[Coord],
+        polyline: &[Coord<T>],
         first: usize,
         last: usize,
-        ts: &[f64],
-        bez_curve: &[Coord],
-    ) -> Vec<f64> {
-        let mut new_ts = vec![0.; last - first + 1];
+        ts: &[T],
+        bez_curve: &[Coord<T>],
+    ) -> Vec<T> {
+        let mut new_ts = vec![T::zero(); last - first + 1];
 
         for i in first..=last {
             new_ts[i - first] = Self::newton_raphson(bez_curve, polyline[i], ts[i - first]);
@@ -287,25 +329,25 @@ impl BezierString {
     }
 
     // bez_curve Q(u) at time t is supposed to be p, refine t
-    fn newton_raphson(bez_curve: &[Coord], p: Coord, t: f64) -> f64 {
+    fn newton_raphson(bez_curve: &[Coord<T>], p: Coord<T>, t: T) -> T {
         // Q(t)
         let bez_t = Self::evaluate_bezier(3, bez_curve, t);
 
         // Cubic bez prime is quadratic
-        let mut bez_prime = [Coord::default(), Coord::default(), Coord::default()];
+        let mut bez_prime = [Coord::<T>::zero(); 3];
         // Cubic bez double prime is linear
-        let mut bez_double_prime = [Coord::default(), Coord::default()];
+        let mut bez_double_prime = [Coord::<T>::zero(); 2];
 
         // Generate control vertices for Q'
         for i in 0..3 {
-            bez_prime[i].x = (bez_curve[i + 1].x - bez_curve[i].x) * 3.0;
-            bez_prime[i].y = (bez_curve[i + 1].y - bez_curve[i].y) * 3.0;
+            bez_prime[i].x = (bez_curve[i + 1].x - bez_curve[i].x) * T::from(3.0).unwrap();
+            bez_prime[i].y = (bez_curve[i + 1].y - bez_curve[i].y) * T::from(3.0).unwrap();
         }
 
         // Generate control vertices for Q''
         for i in 0..2 {
-            bez_double_prime[i].x = (bez_prime[i + 1].x - bez_prime[i].x) * 2.0;
-            bez_double_prime[i].y = (bez_prime[i + 1].y - bez_prime[i].y) * 2.0;
+            bez_double_prime[i].x = (bez_prime[i + 1].x - bez_prime[i].x) * T::from(2.0).unwrap();
+            bez_double_prime[i].y = (bez_prime[i + 1].y - bez_prime[i].y) * T::from(2.0).unwrap();
         }
 
         // Compute Q'(t) and Q''(t)
@@ -319,7 +361,7 @@ impl BezierString {
             + (qp_t.y) * (qp_t.y)
             + (bez_t.x - p.x) * (qpp_t.x)
             + (bez_t.y - p.y) * (qpp_t.y);
-        if denominator == 0.0 {
+        if denominator == T::zero() {
             return t;
         }
         // Compute f(t)
@@ -332,14 +374,14 @@ impl BezierString {
     // max of distance between polyline points and the fitted curve
     // checks even the halfway point of every line segment
     fn compute_max_error(
-        polyline: &[Coord],
+        polyline: &[Coord<T>],
         first: usize,
         last: usize,
-        bez_curve: &[Coord],
-        ts: &[f64],
-    ) -> (f64, usize) {
+        bez_curve: &[Coord<T>],
+        ts: &[T],
+    ) -> (T, usize) {
         let mut split_point = (last + first).div_ceil(2);
-        let mut max_dist = 0.0;
+        let mut max_dist = T::zero();
         for i in first..last {
             let p = Self::evaluate_bezier(3, bez_curve, ts[i - first]);
             let dist = (p - polyline[i]).magnitude_squared();
@@ -349,8 +391,13 @@ impl BezierString {
                 split_point = i;
             }
 
-            let p = Self::evaluate_bezier(3, bez_curve, (ts[i - first] + ts[i - first + 1]) / 2.);
-            let dist = (p - (polyline[i] + polyline[i + 1]) / 2.).magnitude_squared();
+            let p = Self::evaluate_bezier(
+                3,
+                bez_curve,
+                (ts[i - first] + ts[i - first + 1]) / T::from(2.).unwrap(),
+            );
+            let dist =
+                (p - (polyline[i] + polyline[i + 1]) / T::from(2.).unwrap()).magnitude_squared();
             if dist >= max_dist {
                 max_dist = dist;
                 split_point = i.max(first + 1); //if i == first { i + 1 } else { i };
@@ -360,14 +407,14 @@ impl BezierString {
     }
 
     // evaluate the bezier value at time t
-    fn evaluate_bezier(degree: usize, bezier_segment: &[Coord], t: f64) -> Coord {
+    fn evaluate_bezier(degree: usize, bezier_segment: &[Coord<T>], t: T) -> Coord<T> {
         // Create a temporary vector to store the control points
         let mut v_temp = bezier_segment[..=degree].to_vec();
 
         // De Casteljau algorithm, just lerp-ing between lower degree beziers
         for i in 1..=degree {
             for j in 0..=(degree - i) {
-                v_temp[j] = v_temp[j] * (1. - t) + v_temp[j + 1] * t;
+                v_temp[j] = v_temp[j] * (T::one() - t) + v_temp[j + 1] * t;
             }
         }
         v_temp[0]
@@ -376,27 +423,28 @@ impl BezierString {
 
 // impl the used geo functions myself to avoid
 // having the entire geo crate as a dependency
-trait VectorTraits<Rhs = Self>
+trait VectorTraits<T = f64, Rhs = Self>
 where
     Self: Sized,
+    T: CoordFloat,
 {
-    fn magnitude_squared(&self) -> f64;
-    fn magnitude(&self) -> f64;
-    fn dot_product(&self, other: Rhs) -> f64;
+    fn magnitude_squared(&self) -> T;
+    fn magnitude(&self) -> T;
+    fn dot_product(&self, other: Rhs) -> T;
     fn try_normalize(&self) -> Option<Self>;
     fn is_finite(&self) -> bool;
 }
 
-impl VectorTraits for Coord {
-    fn magnitude_squared(&self) -> f64 {
+impl<T: CoordFloat> VectorTraits<T> for Coord<T> {
+    fn magnitude_squared(&self) -> T {
         self.x * self.x + self.y * self.y
     }
 
-    fn magnitude(&self) -> f64 {
+    fn magnitude(&self) -> T {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
-    fn dot_product(&self, other: Self) -> f64 {
+    fn dot_product(&self, other: Self) -> T {
         self.x * other.x + self.y * other.y
     }
 
