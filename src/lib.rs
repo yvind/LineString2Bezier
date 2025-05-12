@@ -1,7 +1,7 @@
 use geo_types::{Coord, LineString};
 
 #[derive(Clone, Debug)]
-pub struct BezierSegment(pub (Coord, Option<Coord>, Option<Coord>, Coord));
+pub struct BezierSegment(pub (Coord, Option<(Coord, Coord)>, Coord));
 
 impl BezierSegment {
     pub fn is_bezier_segment(&self) -> bool {
@@ -11,7 +11,7 @@ impl BezierSegment {
 
 impl From<[Coord; 4]> for BezierSegment {
     fn from(value: [Coord; 4]) -> Self {
-        BezierSegment((value[0], Some(value[1]), Some(value[2]), value[3]))
+        BezierSegment((value[0], Some((value[1], value[2])), value[3]))
     }
 }
 
@@ -39,7 +39,7 @@ impl BezierString {
 
             let mut prev_coord = polyline.0[0];
             for p in polyline.0.iter().skip(1) {
-                segments.push(BezierSegment((prev_coord, None, None, *p)));
+                segments.push(BezierSegment((prev_coord, None, *p)));
                 prev_coord = *p;
             }
 
@@ -81,7 +81,7 @@ impl BezierString {
     ) {
         // Handle two-point case, recursion base case
         if last - first == 1 {
-            bezier_string.push(BezierSegment((polyline[first], None, None, polyline[last])));
+            bezier_string.push(BezierSegment((polyline[first], None, polyline[last])));
             return;
         }
 
@@ -338,7 +338,7 @@ impl BezierString {
         bez_curve: &[Coord],
         ts: &[f64],
     ) -> (f64, usize) {
-        let mut split_point = (last + first + 1) / 2;
+        let mut split_point = (last + first).div_ceil(2);
         let mut max_dist = 0.0;
         for i in first..last {
             let p = Self::evaluate_bezier(3, bez_curve, ts[i - first]);
@@ -374,7 +374,7 @@ impl BezierString {
     }
 }
 
-// impl the used functions myself to avoid
+// impl the used geo functions myself to avoid
 // having the entire geo crate as a dependency
 trait VectorTraits<Rhs = Self>
 where
