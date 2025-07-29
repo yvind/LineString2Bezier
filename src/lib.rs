@@ -2,11 +2,11 @@
 //!
 //! Pass the linestring and a maximum allowed error to BezierString::from_linestring
 //! The error is the maximum distance between the linestring and the bezier spline
-//! evaulated at the linestring vertices and at the middle point between the vertices
+//! evaluated at the linestring vertices and at the middle point between the vertices
 
 use geo_types::{Coord, CoordFloat, LineString};
 
-/// Simple struct to represent a bezier segement
+/// Simple struct to represent a bezier segment
 /// If the `Option` is `None` then the segment is a simple straight line segment
 #[derive(Clone, Debug)]
 pub struct BezierSegment<T: CoordFloat = f64> {
@@ -67,7 +67,7 @@ impl<T: CoordFloat> BezierString<T> {
     }
 
     /// Convert a [geo_types::LineString] to a [BezierString] with a maximum of `error` deviation between the two
-    /// evaulated at the linestring vertices and at the middle point between the vertices
+    /// evaluated at the linestring vertices and at the middle point between the vertices
     pub fn from_linestring(linestring: LineString<T>, error: T) -> BezierString<T> {
         let n_pts = linestring.0.len();
         if n_pts <= 2 || (n_pts <= 3 && linestring.is_closed()) {
@@ -88,11 +88,14 @@ impl<T: CoordFloat> BezierString<T> {
         let mut tangent_left = Self::compute_left_tangent(linestring.0.as_slice(), n_pts - 1);
 
         if linestring.is_closed() {
-            tangent_right = (tangent_right - tangent_left).try_normalize().unwrap();
-            tangent_left = -tangent_right;
+            let diff = tangent_right - tangent_left;
+            if diff != Coord::zero() {
+                tangent_right = diff.try_normalize().unwrap();
+                tangent_left = -tangent_right;
+            }
         }
 
-        // recursivly tries to fit bezier segments to the linestring
+        // recursively tries to fit bezier segments to the linestring
         Self::fit_cubic(
             &linestring.0,
             0,
@@ -141,7 +144,7 @@ impl<T: CoordFloat> BezierString<T> {
             return;
         }
 
-        // If error not too large, try one step of newton-rhapson
+        // If error not too large, try one step of Newton-Rhapson
         if max_error < T::from(2.).unwrap() * error {
             ts = Self::reparameterize(polyline, first, last, &ts, &bez_curve);
             bez_curve =
@@ -198,7 +201,7 @@ impl<T: CoordFloat> BezierString<T> {
         }
 
         // Create the C and X matrices
-        // C is symmetric 2x2, sum of indecies in 2x2 gives index in flat array
+        // C is symmetric 2x2, sum of indices in 2x2 gives index in flat array
         // X is a 2x1 vector
         let mut c = [T::zero(); 3];
         let mut x = [T::zero(); 2];
@@ -312,7 +315,7 @@ impl<T: CoordFloat> BezierString<T> {
     }
 
     // given a set of points and their parameterization on the bez curve
-    // use newton rhapson to try and refine the parameterization
+    // use Newton-Rhapson to try and refine the parameterization
     fn reparameterize(
         polyline: &[Coord<T>],
         first: usize,
