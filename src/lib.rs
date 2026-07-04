@@ -3,7 +3,7 @@
 //!
 //! Pass the line_string and a maximum allowed error to [BezierString::from_line_string]
 //! The error is the maximum distance between the line_string and the bezier spline
-//! evaluated at the line_string vertices and at the middle point between the vertices
+//! evaluated at the line_string vertices and bezier perpendicular distance extremes
 
 #![deny(
     elided_lifetimes_in_paths,
@@ -99,53 +99,51 @@ impl<T: CoordFloat> BezierCurve<T> {
             return Err(Error::TooSmallErrorGiven);
         }
 
-        let mut num_sample_points = 3;
+        let mut coords = vec![self.start];
+        let mut stack = vec![self];
 
-        let mut coords = Vec::with_capacity(2 * num_sample_points);
-        let mut ts = Vec::with_capacity(2 * num_sample_points);
-
-        let arr_bc = self.clone().to_array();
-        let slice = arr_bc.as_slice();
-
-        loop {
-            ts.clear();
-            coords.clear();
-
-            #[allow(clippy::unwrap_used)]
-            let sample_interval = T::one() / T::from(num_sample_points - 1).unwrap();
-
-            coords.push(self.start);
-            ts.push(T::zero());
-            for i in 1..num_sample_points - 1 {
-                #[allow(clippy::unwrap_used)]
-                let t = T::from(i).unwrap() * sample_interval;
-
-                ts.push(t);
-
-                let coord = self.start * bezier_basis_0(t)
-                    + self.handle1 * bezier_basis_1(t)
-                    + self.handle2 * bezier_basis_2(t)
-                    + self.end * bezier_basis_3(t);
-
-                coords.push(coord);
+        while let Some(curve) = stack.pop() {
+            if curve.max_distance_to_chord() <= error {
+                coords.push(curve.end);
+            } else {
+                let (left, right) = curve.split();
+                stack.push(right);
+                stack.push(left);
             }
-            ts.push(T::one());
-            coords.push(self.end);
-
-            let (mut current_error, _) =
-                compute_max_error(&coords, 0, coords.len() - 1, slice, &ts);
-            if current_error > error {
-                // let's try a newton step
-                reparameterize(&mut ts, &coords, 0, coords.len() - 1, slice);
-                (current_error, _) = compute_max_error(&coords, 0, coords.len() - 1, slice, &ts);
-            }
-            if current_error <= error {
-                break;
-            }
-            num_sample_points += 1;
         }
 
         Ok(LineString(coords))
+    }
+
+    fn split(&self) -> (Self, Self) {
+        let two = T::one() + T::one();
+        let p01 = (self.start + self.handle1) / two;
+        let p12 = (self.handle1 + self.handle2) / two;
+        let p23 = (self.handle2 + self.end) / two;
+        let p012 = (p01 + p12) / two;
+        let p123 = (p12 + p23) / two;
+        let p0123 = (p012 + p123) / two;
+
+        (
+            BezierCurve {
+                start: self.start,
+                handle1: p01,
+                handle2: p012,
+                end: p0123,
+            },
+            BezierCurve {
+                start: p0123,
+                handle1: p123,
+                handle2: p23,
+                end: self.end,
+            },
+        )
+    }
+
+    fn max_distance_to_chord(&self) -> T {
+        point_to_line_segment_distance(self.handle1, self.start, self.end).max(
+            point_to_line_segment_distance(self.handle2, self.start, self.end),
+        )
     }
 }
 
@@ -637,7 +635,7 @@ fn newton_raphson<T: CoordFloat>(bez_curve: &[Coord<T>], p: Coord<T>, t: T) -> T
     t - (numerator / denominator)
 }
 
-// max distance between polyline vertices and the fitted curve and index of that vertex
+// max distance between the polyline and the fitted curve and index to split at
 fn compute_max_error<T: CoordFloat>(
     polyline: &[Coord<T>],
     first: usize,
@@ -645,8 +643,6 @@ fn compute_max_error<T: CoordFloat>(
     bez_curve: &[Coord<T>],
     ts: &[T],
 ) -> (T, usize) {
-    //let two = T::one() + T::one();
-
     let mut split_point = first + 1;
     let mut max_dist = T::zero();
     for i in first..=last {
@@ -655,17 +651,84 @@ fn compute_max_error<T: CoordFloat>(
 
         if dist >= max_dist {
             max_dist = dist;
-            split_point = i;
+            if i > first && i < last {
+                split_point = i;
+            }
         }
+    }
 
-        // let p = evaluate_bezier(3, bez_curve, (ts[i - first] + ts[i - first + 1]) / two);
-        // let dist = (p - (polyline[i] + polyline[i + 1]) / two).magnitude_squared();
-        // if dist >= max_dist {
-        //     max_dist = dist;
-        //     split_point = i.max(first + 1);
-        // }
+    for i in first..last {
+        let t_min = ts[i - first];
+        let t_max = ts[i - first + 1];
+        let segment_start = polyline[i];
+        let segment_end = polyline[i + 1];
+
+        for t in perpendicular_extrema_parameters(bez_curve, segment_start, segment_end) {
+            if !(t_min..=t_max).contains(&t) {
+                continue;
+            }
+
+            let p = evaluate_bezier(3, bez_curve, t);
+            let dist = point_to_line_segment_distance_squared(p, segment_start, segment_end);
+
+            if dist >= max_dist {
+                max_dist = dist;
+                split_point = if i + 1 < last {
+                    i + 1
+                } else {
+                    i.max(first + 1)
+                };
+            }
+        }
     }
     (max_dist.sqrt(), split_point)
+}
+
+fn perpendicular_extrema_parameters<T: CoordFloat>(
+    bez_curve: &[Coord<T>],
+    line_start: Coord<T>,
+    line_end: Coord<T>,
+) -> Vec<T> {
+    let two = T::one() + T::one();
+    let three = two + T::one();
+    let line_delta = line_end - line_start;
+
+    if line_delta.magnitude_squared() <= T::epsilon() {
+        return Vec::new();
+    }
+
+    let q0 = cross_product((bez_curve[1] - bez_curve[0]) * three, line_delta);
+    let q1 = cross_product((bez_curve[2] - bez_curve[1]) * three, line_delta);
+    let q2 = cross_product((bez_curve[3] - bez_curve[2]) * three, line_delta);
+
+    solve_quadratic(q0 - two * q1 + q2, two * (q1 - q0), q0)
+}
+
+fn solve_quadratic<T: CoordFloat>(a: T, b: T, c: T) -> Vec<T> {
+    let two = T::one() + T::one();
+    let four = two + two;
+
+    if a.abs() <= T::epsilon() {
+        if b.abs() <= T::epsilon() {
+            return Vec::new();
+        }
+        return vec![-c / b];
+    }
+
+    let discriminant = b * b - four * a * c;
+    if discriminant < T::zero() {
+        return Vec::new();
+    }
+
+    if discriminant <= T::epsilon() {
+        return vec![-b / (two * a)];
+    }
+
+    let sqrt_discriminant = discriminant.sqrt();
+    vec![
+        (-b - sqrt_discriminant) / (two * a),
+        (-b + sqrt_discriminant) / (two * a),
+    ]
 }
 
 // evaluate a bezier of the given degree at time t
@@ -680,6 +743,37 @@ fn evaluate_bezier<T: CoordFloat>(degree: usize, bezier_segment: &[Coord<T>], t:
         }
     }
     v_temp[0]
+}
+
+fn point_to_line_segment_distance<T: CoordFloat>(
+    point: Coord<T>,
+    start: Coord<T>,
+    end: Coord<T>,
+) -> T {
+    point_to_line_segment_distance_squared(point, start, end).sqrt()
+}
+
+fn point_to_line_segment_distance_squared<T: CoordFloat>(
+    point: Coord<T>,
+    start: Coord<T>,
+    end: Coord<T>,
+) -> T {
+    let line_delta = end - start;
+    let length_squared = line_delta.magnitude_squared();
+
+    if length_squared <= T::epsilon() {
+        return (point - start).magnitude_squared();
+    }
+
+    let t = (point - start).dot_product(&line_delta) / length_squared;
+    let t = t.clamp(T::zero(), T::one());
+
+    (point - (start + line_delta * t)).magnitude_squared()
+}
+
+#[inline]
+fn cross_product<T: CoordFloat>(lhs: Coord<T>, rhs: Coord<T>) -> T {
+    lhs.x * rhs.y - lhs.y * rhs.x
 }
 
 // impl the used geo functions myself to avoid
@@ -930,6 +1024,61 @@ mod tests {
         println!("{:?}", max_dist);
 
         assert!(max_dist < 0.1);
+    }
+
+    #[test]
+    fn bezier_curve_to_line_string_respects_error_between_sampled_points() {
+        let curve = BezierCurve {
+            start: coord! { x: 0., y: 0. },
+            handle1: coord! { x: 0., y: 100. },
+            handle2: coord! { x: 10., y: 100. },
+            end: coord! { x: 10., y: 0. },
+        };
+
+        let error = 1.;
+        let line_string = curve
+            .clone()
+            .to_line_string(error)
+            .expect("Approximation failed");
+
+        let max_dist = actual_max_dist_between_bezier_and_line_string(&curve, &line_string, 1000);
+
+        assert!(line_string.0.len() > 3);
+        assert!(max_dist <= error + 1.0e-9, "{max_dist}");
+    }
+
+    #[test]
+    fn compute_max_error_checks_line_segment_extrema() {
+        let polyline: [Coord<f64>; 2] = [coord! { x: 0., y: 0. }, coord! { x: 10., y: 0. }];
+        let curve: [Coord<f64>; 4] = [
+            coord! { x: 0., y: 0. },
+            coord! { x: 0., y: 10. },
+            coord! { x: 10., y: 10. },
+            coord! { x: 10., y: 0. },
+        ];
+        let ts = [0.0_f64, 1.];
+
+        let (max_error, split_point) = crate::compute_max_error(&polyline, 0, 1, &curve, &ts);
+
+        assert!((max_error - 7.5).abs() < 1.0e-9, "{max_error}");
+        assert_eq!(split_point, 1);
+    }
+
+    #[test]
+    fn compute_max_error_finds_extrema_away_from_midpoint() {
+        let polyline: [Coord<f64>; 2] = [coord! { x: 0., y: 0. }, coord! { x: 1., y: 0. }];
+        let curve: [Coord<f64>; 4] = [
+            coord! { x: 0., y: 0. },
+            coord! { x: 0.25, y: 1. },
+            coord! { x: 0.75, y: 0. },
+            coord! { x: 1., y: 0. },
+        ];
+        let ts = [0.0_f64, 1.];
+
+        let (max_error, split_point) = crate::compute_max_error(&polyline, 0, 1, &curve, &ts);
+
+        assert!((max_error - 4. / 9.).abs() < 1.0e-9, "{max_error}");
+        assert_eq!(split_point, 1);
     }
 
     #[test]
